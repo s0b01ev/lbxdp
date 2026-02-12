@@ -1,0 +1,19 @@
+[package]
+name = "lbxdp-ebpf"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+lbxdp-common = { path = "../lbxdp-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+network-types = "0.1.0"
+
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "lbxdp"
+path = "src/main.rs"
