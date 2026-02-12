@@ -1,5 +1,8 @@
 use anyhow::Context as _;
-use aya::programs::{Xdp, XdpFlags};
+use aya::{
+    maps::{MapData, PerCpuArray},
+    programs::{Xdp, XdpFlags},
+};
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
@@ -61,6 +64,9 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+
+    let mut backends: PerCpuArray<_, u32> =
+        PerCpuArray::try_from(ebpf.map_mut("BACKENDS").unwrap())?;
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
