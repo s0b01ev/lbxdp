@@ -88,6 +88,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
 
             let dest_port = u16::from_be_bytes(unsafe { (*tcphdr).dest });
 
+            // TODO: unhardcode port
             if dest_port != 8740 {
                 return Ok(xdp_action::XDP_PASS);
             }
@@ -115,6 +116,15 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 last_seen: unsafe { bpf_ktime_get_ns() },
             };
             if syn == 1 {
+                // new connection
+                //
+                // 1 find a backend with least conn
+                //  find BACKEND_CONNS idx with min value
+                //  find port number: BACKENDS[idx]
+                // 2 update CONNECTIONS
+                //  key: {src_ip, src_port} value: {idx. state(?), last_seen}
+                // 3 update BACKEN_CONNS
+                //  BACKEND_CONNS[idx]++
                 match BACKENDS.get(0) {
                     Some(v) => {
                         let vv = v.clone();
