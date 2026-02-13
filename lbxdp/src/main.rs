@@ -1,7 +1,8 @@
 use anyhow::Context as _;
 use aya::{
-    maps::{MapData, PerCpuArray},
+    maps::{PerCpuArray, PerCpuValues},
     programs::{Xdp, XdpFlags},
+    util::nr_cpus,
 };
 use clap::Parser;
 #[rustfmt::skip]
@@ -65,8 +66,25 @@ async fn main() -> anyhow::Result<()> {
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    let mut backends: PerCpuArray<_, u32> =
+    let mut backends: PerCpuArray<_, u16> =
         PerCpuArray::try_from(ebpf.map_mut("BACKENDS").unwrap())?;
+
+    let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
+    // TODO: make it configurable
+    let backend_ports: Vec<u16> = vec![3000, 3001, 3002];
+    for (idx, &port) in backend_ports.iter().enumerate() {
+        let values = PerCpuValues::try_from(vec![port; nr_cpus])?;
+        backends.set(idx as u32, values, 0)?;
+    }
+    /*
+    backend_ports
+        .iter()
+        .enumerate()
+        .try_for_each(|(idx, &port)| {
+            let values = PerCpuValues::try_from(vec![port; nr_cpus])?;
+            backends.set(idx as u32, values, 0)
+        })?;
+    */
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

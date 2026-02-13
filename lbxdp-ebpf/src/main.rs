@@ -32,8 +32,9 @@ static CONNECTIONS: LruHashMap<ConnMapKey, ConnMapValue> = LruHashMap::with_max_
 #[map(name = "BACKEND_CONNS")]
 static BACKEND_CONNS: PerCpuArray<u32> = PerCpuArray::with_max_entries(32, 0);
 
+// TODO: can be just Array<u16>
 #[map(name = "BACKENDS")]
-static BACKENDS: PerCpuArray<u32> = PerCpuArray::with_max_entries(32, 0);
+static BACKENDS: PerCpuArray<u16> = PerCpuArray::with_max_entries(32, 0);
 
 #[inline(always)]
 fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
@@ -114,6 +115,13 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 last_seen: unsafe { bpf_ktime_get_ns() },
             };
             if syn == 1 {
+                match BACKENDS.get(0) {
+                    Some(v) => {
+                        let vv = v.clone();
+                        info!(&ctx, "BACKENDS {}", vv);
+                    }
+                    None => {}
+                }
                 match CONNECTIONS.insert(&conn_map_key, &conn_map_value, 0) {
                     Ok(_) => {
                         info!(
