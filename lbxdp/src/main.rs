@@ -5,13 +5,15 @@ use aya::{
     util::nr_cpus,
 };
 use clap::Parser;
+use std::net::Ipv4Addr;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "wlp2s0")]
+    //#[clap(short, long, default_value = "wlp2s0")]
+    #[clap(short, long, default_value = "veth-ns")]
     iface: String,
 }
 
@@ -66,14 +68,18 @@ async fn main() -> anyhow::Result<()> {
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    let mut backends: PerCpuArray<_, u16> =
+    let mut backends: PerCpuArray<_, u32> =
         PerCpuArray::try_from(ebpf.map_mut("BACKENDS").unwrap())?;
 
     let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
+
     // TODO: make it configurable
-    let backend_ports: Vec<u16> = vec![3000, 3001, 3002];
-    for (idx, &port) in backend_ports.iter().enumerate() {
-        let values = PerCpuValues::try_from(vec![port; nr_cpus])?;
+    let backend_ips: Vec<u32> = vec![
+        u32::from_be_bytes(Ipv4Addr::new(172, 16, 86, 86).octets()),
+        u32::from_be_bytes(Ipv4Addr::new(172, 16, 86, 250).octets()),
+    ];
+    for (idx, &ip) in backend_ips.iter().enumerate() {
+        let values = PerCpuValues::try_from(vec![ip; nr_cpus])?;
         backends.set(idx as u32, values, 0)?;
     }
     /*
