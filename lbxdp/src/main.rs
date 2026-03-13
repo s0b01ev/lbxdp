@@ -12,8 +12,7 @@ use tokio::signal;
 
 #[derive(Debug, Parser)]
 struct Opt {
-    //#[clap(short, long, default_value = "wlp2s0")]
-    #[clap(short, long, default_value = "veth-ns")]
+    #[clap(short, long, default_value = "wlp2s0")]
     iface: String,
 }
 
@@ -75,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
 
     // TODO: make it configurable
     let backend_ips: Vec<u32> = vec![
-        u32::from_be_bytes(Ipv4Addr::new(172, 16, 86, 86).octets()),
-        u32::from_be_bytes(Ipv4Addr::new(172, 16, 86, 250).octets()),
+        u32::from_be_bytes(Ipv4Addr::new(192, 168, 86, 247).octets()),
+        u32::from_be_bytes(Ipv4Addr::new(192, 168, 86, 247).octets()),
     ];
     for (idx, &ip) in backend_ips.iter().enumerate() {
         let values = PerCpuValues::try_from(vec![ip; nr_cpus])?;

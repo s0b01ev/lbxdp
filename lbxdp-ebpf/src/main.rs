@@ -9,6 +9,7 @@ use aya_ebpf::{
     maps::{LruHashMap, PerCpuArray, PerCpuHashMap},
     programs::XdpContext,
 };
+use aya_ebpf_bindings::bindings::{__be32, __wsum};
 use aya_log_ebpf::info;
 use core::{mem, ptr};
 use network_types::{
@@ -16,15 +17,6 @@ use network_types::{
     ip::{self, IpProto, Ipv4Hdr},
     tcp::TcpHdr,
 };
-
-#[repr(C)]
-struct Ipv4PseudoHeader {
-    saddr: u32,
-    daddr: u32,
-    zero: u8,
-    proto: u8,
-    len: u16,
-}
 
 struct ConnMapKey {
     src_addr: u32,
@@ -36,7 +28,19 @@ struct ConnMapValue {
     last_seen: u64,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct AddrPair {
+    saddr: u32,
+    daddr: u32,
+}
+
 static MAX_BACKENDS: u32 = 4;
+
+static OWN_IP: u32 = 0xc0a856fa; // 192.168.86.250
+static OWN_MAC: [u8; 6] = [0x48, 0xf1, 0x7f, 0x60, 0x29, 0xc6];
+static BACKEND_IP: u32 = 0xc0a856f7; // 192.168.86.247
+static BACKEND_MAC: [u8; 6] = [0xa0, 0x78, 0x17, 0x6c, 0xa4, 0x4f];
 
 #[map(name = "CONNECTIONS")]
 static CONNECTIONS: LruHashMap<ConnMapKey, ConnMapValue> = LruHashMap::with_max_entries(1024, 0);
@@ -56,6 +60,18 @@ pub fn csum_fold_helper(mut csum: u64) -> u16 {
         }
     }
     !(csum as u16)
+}
+
+#[inline(always)]
+fn csum_unfold(csum: u16) -> u64 {
+    (!(csum) as u64) & 0xffff
+}
+
+#[inline(always)]
+fn apply_diff(check: [u8; 2], diff: i64) -> [u8; 2] {
+    let check = u16::from_be_bytes(check);
+    let sum = csum_unfold(check).wrapping_add(diff as u64);
+    u16::to_be_bytes(csum_fold_helper(sum))
 }
 
 #[inline(always)]
@@ -97,35 +113,6 @@ fn csum_finish(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
-#[inline(always)]
-fn csum_apply_diff(old_check_be: [u8; 2], diff: u32) -> [u8; 2] {
-    // checksum field is stored in network byte order
-    let old_check = u16::from_be_bytes(old_check_be);
-
-    let mut sum = (!old_check as u32) & 0xffff;
-
-    sum = sum.wrapping_add(diff);
-
-    sum = (sum & 0xffff) + (sum >> 16);
-    sum = (sum & 0xffff) + (sum >> 16);
-
-    let new_check = !(sum as u16);
-    new_check.to_be_bytes()
-}
-
-#[inline(always)]
-unsafe fn tcp_csum_replace_daddr(tcph: *mut TcpHdr, mut old_dst_addr: u32, mut new_dst_addr: u32) {
-    let diff = bpf_csum_diff(
-        &mut old_dst_addr as *mut _ as *mut u32,
-        mem::size_of::<u32>() as u32,
-        &mut new_dst_addr as *mut _ as *mut u32,
-        mem::size_of::<u32>() as u32,
-        0,
-    ) as u32;
-
-    (*tcph).check = csum_apply_diff((*tcph).check, diff);
-}
-
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -135,7 +122,7 @@ pub fn lbxdp(ctx: XdpContext) -> u32 {
 }
 
 fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+    let ethhdr: *mut EthHdr = mut_ptr_at(&ctx, 0)?;
     match unsafe { (*ethhdr).ether_type() } {
         Ok(EtherType::Ipv4) => {}
         _ => return Ok(xdp_action::XDP_PASS),
@@ -147,6 +134,29 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
 
     let dest_addr = unsafe { (*ipv4hdr).dst_addr };
     let dest_addr_display = u32::from_be_bytes(dest_addr);
+
+    let old_ips = AddrPair {
+        saddr: source_addr_display,
+        daddr: dest_addr_display,
+    };
+
+    let new_ips = AddrPair {
+        saddr: OWN_IP,
+        daddr: BACKEND_IP,
+    };
+    let diff = unsafe {
+        bpf_csum_diff(
+            &old_ips as *const _ as *mut __be32,
+            core::mem::size_of::<AddrPair>() as u32,
+            &new_ips as *const _ as *mut __be32,
+            core::mem::size_of::<AddrPair>() as u32,
+            0,
+        )
+    };
+    if diff < 0 {
+        return Err(());
+    }
+    let diff = diff as i64;
 
     let source_port = match unsafe { (*ipv4hdr).proto } {
         IpProto::Tcp => {
@@ -166,30 +176,19 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             let dest_port = u16::from_be_bytes(unsafe { (*tcphdr).dest });
 
             // TODO: unhardcode port
-            if dest_port != 8740 {
+            if dest_port != 8740 && source_port != 8740 {
                 return Ok(xdp_action::XDP_PASS);
             }
 
             let syn = unsafe { (*tcphdr).syn() };
             let fin = unsafe { (*tcphdr).fin() };
             let rst = unsafe { (*tcphdr).rst() };
-            info!(
-                &ctx,
-                "{:i}:{} --> {:i}:{} syn: {} fin: {}",
-                source_addr_display,
-                source_port,
-                dest_addr_display,
-                dest_port,
-                syn,
-                fin
-            );
             let conn_map_key = ConnMapKey {
                 src_addr: source_addr_display,
                 src_port: source_port,
             };
             if syn == 1 {
                 let csum_hdr = unsafe { (*ipv4hdr).checksum() };
-                info!(&ctx, "checksum from header: {:x}", csum_hdr);
                 // new connection
                 //
                 // 1. find BACKEND_CONNS idx with min value
@@ -203,6 +202,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 // 5. update BACKEND_CONNS
                 //      BACKEND_CONNS[idx]++
                 // 1.
+                /*
                 let mut least_conn = 0;
                 let mut least_conn_id = 0;
                 for i in 0..MAX_BACKENDS {
@@ -217,7 +217,9 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         None => {}
                     }
                 }
+                */
                 // 2.
+                /*
                 let mut backend_ip: u32 = 0;
                 match BACKENDS.get(least_conn_id) {
                     Some(v) => {
@@ -226,12 +228,21 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     }
                     None => {}
                 }
+                */
                 // 3a.
-                //let old = unsafe { (*ipv4hdr).checksum() };
-                unsafe { (*ipv4hdr).set_checksum(0) };
                 unsafe {
-                    (*ipv4hdr).dst_addr = u32::to_be_bytes(backend_ip);
+                    (*ipv4hdr).dst_addr = u32::to_be_bytes(BACKEND_IP);
+                    (*ipv4hdr).src_addr = u32::to_be_bytes(OWN_IP);
+                    (*ethhdr).src_addr = OWN_MAC;
+                    (*ethhdr).dst_addr = BACKEND_MAC;
+                    // update IPv4 header checksum
+                    (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
+                    // update TCP checksum too, if this is TCP
+                    (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
+                return Ok(xdp_action::XDP_TX);
+
+                /*
                 let full_cksum = unsafe {
                     bpf_csum_diff(
                         ptr::null_mut(),
@@ -242,8 +253,6 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     )
                 } as u64;
                 let csum = csum_fold_helper(full_cksum);
-                info!(&ctx, "csum: {:x}", csum);
-                //unsafe { (*ipv4hdr).set_checksum(old) };
                 unsafe { (*ipv4hdr).set_checksum(csum.to_be()) };
                 // 4
                 let conn_map_value = ConnMapValue {
@@ -253,40 +262,20 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     last_seen: unsafe { bpf_ktime_get_ns() },
                 };
                 let tcp_csum = unsafe { (*tcphdr).check };
-                info!(&ctx, "TCP CSUM {:x} {:x}", tcp_csum[0], tcp_csum[1]);
                 // 3c
                 unsafe {
                     tcp_csum_replace_daddr(tcphdr, dest_addr_display, backend_ip);
                 }
                 let tcp_csum = unsafe { (*tcphdr).check };
-                info!(&ctx, "NEW TCP CSUM {:x} {:x}", tcp_csum[0], tcp_csum[1]);
 
                 match CONNECTIONS.insert(&conn_map_key, &conn_map_value, 0) {
-                    Ok(_) => {
-                        info!(
-                            &ctx,
-                            " -- inserted {:i}:{} --> {:i}:{}  {}",
-                            source_addr_display,
-                            source_port,
-                            dest_addr_display,
-                            dest_port,
-                            conn_map_value.last_seen
-                        );
-                    }
+                    Ok(_) => {}
                     Err(_) => {}
                 }
+                */
             } else if fin == 1 || rst == 1 {
                 match CONNECTIONS.remove(&conn_map_key) {
-                    Ok(_) => {
-                        info!(
-                            &ctx,
-                            " -- deleted {:i}:{} --> {:i}:{}",
-                            source_addr_display,
-                            source_port,
-                            dest_addr_display,
-                            dest_port
-                        );
-                    }
+                    Ok(_) => {}
                     Err(_) => {}
                 }
             } else {
@@ -298,15 +287,6 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     // forever. Need some expiration logic for such connections
                     if let Some(val) = CONNECTIONS.get_ptr_mut(&conn_map_key) {
                         (*val).last_seen = bpf_ktime_get_ns();
-                        info!(
-                            &ctx,
-                            " -- updated {:i}:{} --> {:i}:{}  {}",
-                            source_addr_display,
-                            source_port,
-                            dest_addr_display,
-                            dest_port,
-                            (*val).last_seen
-                        );
                     }
                 }
             }

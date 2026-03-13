@@ -46,6 +46,16 @@ dependencies = [
 [[package]]
 name = "aya-build"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59bc42f3c5ddacc34eca28a420b47e3cbb3f0f484137cb2bf1ad2153d0eae52a"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+]
+
+[[package]]
+name = "aya-build"
+version = "0.1.3"
 source = "git+https://github.com/aya-rs/aya#baa7ddb3814fb1728318dd30ab43da8b139d60ce"
 dependencies = [
  "anyhow",
@@ -59,9 +69,9 @@ name = "aya-ebpf"
 version = "0.1.2"
 source = "git+https://github.com/aya-rs/aya#baa7ddb3814fb1728318dd30ab43da8b139d60ce"
 dependencies = [
- "aya-build",
- "aya-ebpf-bindings",
- "aya-ebpf-cty",
+ "aya-build 0.1.3 (git+https://github.com/aya-rs/aya)",
+ "aya-ebpf-bindings 0.1.2 (git+https://github.com/aya-rs/aya)",
+ "aya-ebpf-cty 0.2.3 (git+https://github.com/aya-rs/aya)",
  "aya-ebpf-macros",
  "rustversion",
 ]
@@ -69,10 +79,29 @@ dependencies = [
 [[package]]
 name = "aya-ebpf-bindings"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71ee8e6a617f040d8da7565ec4010aea75e33cda4662f64c019c66ee97d17889"
+dependencies = [
+ "aya-build 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aya-ebpf-cty 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "aya-ebpf-bindings"
+version = "0.1.2"
 source = "git+https://github.com/aya-rs/aya#baa7ddb3814fb1728318dd30ab43da8b139d60ce"
 dependencies = [
- "aya-build",
- "aya-ebpf-cty",
+ "aya-build 0.1.3 (git+https://github.com/aya-rs/aya)",
+ "aya-ebpf-cty 0.2.3 (git+https://github.com/aya-rs/aya)",
+]
+
+[[package]]
+name = "aya-ebpf-cty"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6f33396742e7fd0f519c1e0de5141d84e1a8df69146a557c08cc222b0ceace4"
+dependencies = [
+ "aya-build 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -80,7 +109,7 @@ name = "aya-ebpf-cty"
 version = "0.2.3"
 source = "git+https://github.com/aya-rs/aya#baa7ddb3814fb1728318dd30ab43da8b139d60ce"
 dependencies = [
- "aya-build",
+ "aya-build 0.1.3 (git+https://github.com/aya-rs/aya)",
 ]
 
 [[package]]
@@ -353,7 +382,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aya",
- "aya-build",
+ "aya-build 0.1.3 (git+https://github.com/aya-rs/aya)",
  "aya-log",
  "cargo_metadata",
  "clap",
@@ -377,6 +406,7 @@ name = "lbxdp-ebpf"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
+ "aya-ebpf-bindings 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "aya-log-ebpf",
  "lbxdp-common",
  "network-types",
