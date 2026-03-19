@@ -4,28 +4,37 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_csum_diff,
-    helpers::bpf_ktime_get_ns,
     macros::{map, xdp},
     maps::{LruHashMap, PerCpuArray, PerCpuHashMap},
     programs::XdpContext,
 };
-use aya_ebpf_bindings::bindings::{__be32, __wsum};
+use aya_ebpf_bindings::bindings::__be32;
 use aya_log_ebpf::info;
 use core::{mem, ptr};
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::{self, IpProto, Ipv4Hdr},
+    ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
 };
 
-struct ConnMapKey {
-    src_addr: u32,
-    src_port: u16,
+struct ClientToBackendMapKey {
+    client_ip: [u8; 4],
+    client_port: u16,
+    client_mac: [u8; 6],
 }
-struct ConnMapValue {
-    backend_id: u32,
-    state: u16,
-    last_seen: u64,
+struct ClientToBackendMapVal {
+    backend_ip: [u8; 4],
+    backend_mac: [u8; 6],
+}
+
+struct BackendToClientMapKey {
+    backend_ip: [u8; 4],
+    backend_mac: [u8; 6],
+}
+struct BackendToClientMapVal {
+    client_ip: [u8; 4],
+    client_port: u16,
+    client_mac: [u8; 6],
 }
 
 #[repr(C)]
@@ -44,8 +53,13 @@ static BACKEND_MAC: [u8; 6] = [0xa0, 0x78, 0x17, 0x6c, 0xa4, 0x4f];
 static CLIENT_IP: u32 = 0xc0a8561d; // 192.168.86.29
 static CLIENT_MAC: [u8; 6] = [0xd8, 0x3a, 0xdd, 0x4c, 0xdf, 0xe7];
 
-#[map(name = "CONNECTIONS")]
-static CONNECTIONS: LruHashMap<ConnMapKey, ConnMapValue> = LruHashMap::with_max_entries(1024, 0);
+#[map(name = "CLIENT_TO_BACKEND")]
+static CLIENT_TO_BACKEND: PerCpuHashMap<ClientToBackendMapKey, ClientToBackendMapVal> =
+    PerCpuHashMap::with_max_entries(1024, 0);
+
+#[map(name = "BACKEND_TO_CLIENT")]
+static BACKEND_TO_CLIENT: PerCpuHashMap<BackendToClientMapKey, BackendToClientMapVal> =
+    PerCpuHashMap::with_max_entries(1024, 0);
 
 #[map(name = "BACKEND_CONNS")]
 static BACKEND_CONNS: PerCpuArray<u32> = PerCpuArray::with_max_entries(4, 0);
@@ -116,6 +130,77 @@ fn mut_ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, ()> {
     Ok((start + offset) as *mut T)
 }
 
+fn add_to_client_to_backend_map(
+    client_ip: [u8; 4],
+    client_port: u16,
+    backend_ip: [u8; 4],
+    backend_mac: [u8; 6],
+    ethhdr: *const EthHdr,
+) -> Result<(), ()> {
+    let map_key = ClientToBackendMapKey {
+        client_ip: client_ip,
+        client_port: client_port,
+        client_mac: unsafe { (*ethhdr).src_addr },
+    };
+    let map_val = ClientToBackendMapVal {
+        backend_ip: backend_ip,
+        backend_mac: backend_mac,
+    };
+    unsafe {
+        CLIENT_TO_BACKEND
+            .insert(map_key, map_val, 0)
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn delete_from_client_to_backend_map(
+    client_ip: [u8; 4],
+    client_port: u16,
+    ethhdr: *const EthHdr,
+) -> Result<(), ()> {
+    let map_key = ClientToBackendMapKey {
+        client_ip: client_ip,
+        client_port: client_port,
+        client_mac: unsafe { (*ethhdr).src_addr },
+    };
+    unsafe { CLIENT_TO_BACKEND.remove(map_key).map_err(|_| ())? };
+    Ok(())
+}
+
+fn add_to_backend_to_client_map(
+    client_ip: [u8; 4],
+    client_port: u16,
+    backend_ip: [u8; 4],
+    backend_mac: [u8; 6],
+    ethhdr: *const EthHdr,
+) -> Result<(), ()> {
+    let map_key = BackendToClientMapKey {
+        backend_ip: backend_ip,
+        backend_mac: backend_mac,
+    };
+    let map_val = BackendToClientMapVal {
+        client_ip: client_ip,
+        client_port: client_port,
+        client_mac: unsafe { (*ethhdr).src_addr },
+    };
+    unsafe {
+        BACKEND_TO_CLIENT
+            .insert(map_key, map_val, 0)
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn delete_from_backend_to_client_map(backend_ip: [u8; 4], backend_mac: [u8; 6]) -> Result<(), ()> {
+    let map_key = BackendToClientMapKey {
+        backend_ip: backend_ip,
+        backend_mac: backend_mac,
+    };
+    unsafe { BACKEND_TO_CLIENT.remove(map_key).map_err(|_| ())? };
+    Ok(())
+}
+
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -155,17 +240,43 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 return Ok(xdp_action::XDP_PASS);
             }
 
-            // client -> LB packets
-            let new_ips = AddrPair {
-                saddr: OWN_IP,
-                daddr: BACKEND_IP,
-            };
-            let diff = csum_diff(old_ips, new_ips);
-            if diff < 0 {
-                return Err(());
-            }
-
+            //// client -> LB packets
+            // TODO: make this check real: lookup BACKENDS map
             if source_addr != u32::to_be_bytes(BACKEND_IP) {
+                let syn = unsafe { (*tcphdr).syn() };
+                if syn == 1 {
+                    add_to_client_to_backend_map(
+                        source_addr,
+                        source_port,
+                        u32::to_be_bytes(BACKEND_IP), // TODO: replace with dynamic value
+                        BACKEND_MAC,                  // TODO: replace with dynamic value
+                        ethhdr,
+                    )?;
+                    info!(&ctx, "added to direct");
+                    add_to_backend_to_client_map(
+                        source_addr,
+                        source_port,
+                        u32::to_be_bytes(BACKEND_IP), // TODO: replace with dynamic value
+                        BACKEND_MAC,                  // TODO: replace with dynamic value
+                        ethhdr,
+                    )?;
+                    info!(&ctx, "added to reverse");
+                }
+                let fin = unsafe { (*tcphdr).fin() };
+                if fin == 1 {
+                    delete_from_client_to_backend_map(source_addr, source_port, ethhdr)?;
+                    info!(&ctx, "removed from direct");
+                    delete_from_backend_to_client_map(u32::to_be_bytes(BACKEND_IP), BACKEND_MAC)?;
+                    info!(&ctx, "removed from reverse");
+                }
+                let new_ips = AddrPair {
+                    saddr: OWN_IP,
+                    daddr: BACKEND_IP,
+                };
+                let diff = csum_diff(old_ips, new_ips);
+                if diff < 0 {
+                    return Err(());
+                }
                 unsafe {
                     (*ipv4hdr).dst_addr = u32::to_be_bytes(BACKEND_IP);
                     (*ipv4hdr).src_addr = u32::to_be_bytes(OWN_IP);
@@ -175,7 +286,8 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
                 return Ok(xdp_action::XDP_TX);
-            // backend -> LB packets
+
+            //// backend -> LB packets
             } else if source_addr == u32::to_be_bytes(BACKEND_IP) {
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
@@ -205,7 +317,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
         _ => return Err(()),
     };
 
-    Ok(xdp_action::XDP_PASS)
+    //Ok(xdp_action::XDP_PASS)
 }
 
 #[cfg(not(test))]
