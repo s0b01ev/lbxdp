@@ -61,12 +61,9 @@ static CLIENT_TO_BACKEND: PerCpuHashMap<ClientToBackendMapKey, ClientToBackendMa
 static BACKEND_TO_CLIENT: PerCpuHashMap<BackendToClientMapKey, BackendToClientMapVal> =
     PerCpuHashMap::with_max_entries(1024, 0);
 
-#[map(name = "BACKEND_CONNS")]
-static BACKEND_CONNS: PerCpuArray<u32> = PerCpuArray::with_max_entries(4, 0);
-
 // TODO: can be just Array<u32>
 #[map(name = "BACKENDS")]
-static BACKENDS: PerCpuArray<u32> = PerCpuArray::with_max_entries(4, 0);
+static BACKENDS: PerCpuHashMap<[u8; 4], u16> = PerCpuHashMap::with_max_entries(4, 0);
 
 #[inline(always)]
 fn csum_diff(old_ips: AddrPair, new_ips: AddrPair) -> i64 {
