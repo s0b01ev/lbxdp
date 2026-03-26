@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_csum_diff,
     macros::{map, xdp},
-    maps::{LruHashMap, PerCpuArray, PerCpuHashMap},
+    maps::{Array, LruHashMap, PerCpuArray, PerCpuHashMap},
     programs::XdpContext,
 };
 use aya_ebpf_bindings::bindings::__be32;
@@ -44,7 +44,7 @@ struct AddrPair {
     daddr: u32,
 }
 
-static MAX_BACKENDS: u32 = 4;
+const MAX_BACKENDS: u32 = 4;
 
 static OWN_IP: u32 = 0xc0a856fa; // 192.168.86.250
 static OWN_MAC: [u8; 6] = [0x48, 0xf1, 0x7f, 0x60, 0x29, 0xc6];
@@ -61,9 +61,14 @@ static CLIENT_TO_BACKEND: PerCpuHashMap<ClientToBackendMapKey, ClientToBackendMa
 static BACKEND_TO_CLIENT: PerCpuHashMap<BackendToClientMapKey, BackendToClientMapVal> =
     PerCpuHashMap::with_max_entries(1024, 0);
 
-// TODO: can be just Array<u32>
 #[map(name = "BACKENDS")]
-static BACKENDS: PerCpuHashMap<[u8; 4], u16> = PerCpuHashMap::with_max_entries(4, 0);
+static BACKENDS: Array<[u8; 4]> = Array::with_max_entries(MAX_BACKENDS, 0);
+
+#[map(name = "BACKEND_MACS")]
+static BACKEND_MACS: Array<[u8; 6]> = Array::with_max_entries(MAX_BACKENDS, 0);
+
+#[map(name = "BACKEND_CONNECTIONS")]
+static BACKEND_CONNECTIONS: PerCpuArray<i32> = PerCpuArray::with_max_entries(MAX_BACKENDS, 0);
 
 #[inline(always)]
 fn csum_diff(old_ips: AddrPair, new_ips: AddrPair) -> i64 {
@@ -198,6 +203,38 @@ fn delete_from_backend_to_client_map(backend_ip: [u8; 4], backend_mac: [u8; 6]) 
     Ok(())
 }
 
+#[inline(always)]
+fn get_least_conn_backend() -> Result<([u8; 4], [u8; 6]), ()> {
+    let first = match BACKEND_CONNECTIONS.get(0) {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+
+    let mut least = first;
+    let mut least_idx = 0;
+    let mut i = 1;
+
+    while i < MAX_BACKENDS {
+        if let Some(&value) = BACKEND_CONNECTIONS.get(i) {
+            if value < least && value != -1 {
+                least = value;
+                least_idx = i;
+            }
+        }
+        i += 1;
+    }
+
+    let ip = match BACKENDS.get(least_idx) {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    let mac = match BACKEND_MACS.get(least_idx) {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    return Ok((ip, mac));
+}
+
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -239,6 +276,22 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
 
             //// client -> LB packets
             // TODO: make this check real: lookup BACKENDS map
+            let least_loaded_backend = get_least_conn_backend()?;
+            info!(
+                &ctx,
+                "backend with least connections: ip {:x}",
+                u32::from_be_bytes(least_loaded_backend.0),
+            );
+            info!(
+                &ctx,
+                "backend with least connections: mac {:x} {:x} {:x} {:x} {:x} {:x}",
+                least_loaded_backend.1[0],
+                least_loaded_backend.1[1],
+                least_loaded_backend.1[2],
+                least_loaded_backend.1[3],
+                least_loaded_backend.1[4],
+                least_loaded_backend.1[5],
+            );
             if source_addr != u32::to_be_bytes(BACKEND_IP) {
                 let syn = unsafe { (*tcphdr).syn() };
                 if syn == 1 {
@@ -282,7 +335,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
-                return Ok(xdp_action::XDP_TX);
+                Ok(xdp_action::XDP_TX)
 
             //// backend -> LB packets
             } else if source_addr == u32::to_be_bytes(BACKEND_IP) {
@@ -303,18 +356,14 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
-                return Ok(xdp_action::XDP_TX);
+                Ok(xdp_action::XDP_TX)
             } else {
-                return Ok(xdp_action::XDP_PASS);
+                Ok(xdp_action::XDP_PASS)
             }
         }
-        IpProto::Udp => {
-            return Ok(xdp_action::XDP_PASS);
-        }
-        _ => return Err(()),
-    };
-
-    //Ok(xdp_action::XDP_PASS)
+        IpProto::Udp => Ok(xdp_action::XDP_PASS),
+        _ => Err(()),
+    }
 }
 
 #[cfg(not(test))]
