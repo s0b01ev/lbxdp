@@ -275,39 +275,25 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             }
 
             //// client -> LB packets
-            // TODO: make this check real: lookup BACKENDS map
             let least_loaded_backend = get_least_conn_backend()?;
-            info!(
-                &ctx,
-                "backend with least connections: ip {:x}",
-                u32::from_be_bytes(least_loaded_backend.0),
-            );
-            info!(
-                &ctx,
-                "backend with least connections: mac {:x} {:x} {:x} {:x} {:x} {:x}",
-                least_loaded_backend.1[0],
-                least_loaded_backend.1[1],
-                least_loaded_backend.1[2],
-                least_loaded_backend.1[3],
-                least_loaded_backend.1[4],
-                least_loaded_backend.1[5],
-            );
+
+            // TODO: unhardcode BACKEND_IP here
             if source_addr != u32::to_be_bytes(BACKEND_IP) {
                 let syn = unsafe { (*tcphdr).syn() };
                 if syn == 1 {
                     add_to_client_to_backend_map(
                         source_addr,
                         source_port,
-                        u32::to_be_bytes(BACKEND_IP), // TODO: replace with dynamic value
-                        BACKEND_MAC,                  // TODO: replace with dynamic value
+                        least_loaded_backend.0,
+                        least_loaded_backend.1,
                         ethhdr,
                     )?;
                     info!(&ctx, "added to direct");
                     add_to_backend_to_client_map(
                         source_addr,
                         source_port,
-                        u32::to_be_bytes(BACKEND_IP), // TODO: replace with dynamic value
-                        BACKEND_MAC,                  // TODO: replace with dynamic value
+                        least_loaded_backend.0,
+                        least_loaded_backend.1,
                         ethhdr,
                     )?;
                     info!(&ctx, "added to reverse");
@@ -316,28 +302,32 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 if fin == 1 {
                     delete_from_client_to_backend_map(source_addr, source_port, ethhdr)?;
                     info!(&ctx, "removed from direct");
-                    delete_from_backend_to_client_map(u32::to_be_bytes(BACKEND_IP), BACKEND_MAC)?;
+                    delete_from_backend_to_client_map(
+                        least_loaded_backend.0,
+                        least_loaded_backend.1,
+                    )?;
                     info!(&ctx, "removed from reverse");
                 }
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
-                    daddr: BACKEND_IP,
+                    daddr: u32::from_be_bytes(least_loaded_backend.0),
                 };
                 let diff = csum_diff(old_ips, new_ips);
                 if diff < 0 {
                     return Err(());
                 }
                 unsafe {
-                    (*ipv4hdr).dst_addr = u32::to_be_bytes(BACKEND_IP);
+                    (*ipv4hdr).dst_addr = least_loaded_backend.0;
                     (*ipv4hdr).src_addr = u32::to_be_bytes(OWN_IP);
                     (*ethhdr).src_addr = OWN_MAC;
-                    (*ethhdr).dst_addr = BACKEND_MAC;
+                    (*ethhdr).dst_addr = least_loaded_backend.1;
                     (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
                 Ok(xdp_action::XDP_TX)
 
             //// backend -> LB packets
+            // TODO: unhardcode BACKEND_IP
             } else if source_addr == u32::to_be_bytes(BACKEND_IP) {
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
