@@ -235,6 +235,40 @@ fn get_least_conn_backend() -> Result<([u8; 4], [u8; 6]), ()> {
     return Ok((ip, mac));
 }
 
+#[inline(always)]
+fn is_backend_ip(ip: [u8; 4]) -> bool {
+    let mut i = 0;
+    while i < MAX_BACKENDS {
+        let _ = match BACKENDS.get(i) {
+            Some(v) => {
+                if are_ips_same(*v, ip) {
+                    return true;
+                }
+            }
+            None => (),
+        };
+        i += 1;
+    }
+    false
+}
+
+#[inline(always)]
+fn are_ips_same(ip1: [u8; 4], ip2: [u8; 4]) -> bool {
+    if ip1[0] != ip2[0] {
+        return false;
+    }
+    if ip1[1] != ip2[1] {
+        return false;
+    }
+    if ip1[2] != ip2[2] {
+        return false;
+    }
+    if ip1[3] != ip2[3] {
+        return false;
+    }
+    true
+}
+
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -277,8 +311,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             //// client -> LB packets
             let least_loaded_backend = get_least_conn_backend()?;
 
-            // TODO: unhardcode BACKEND_IP here
-            if source_addr != u32::to_be_bytes(BACKEND_IP) {
+            if !is_backend_ip(source_addr) {
                 let syn = unsafe { (*tcphdr).syn() };
                 if syn == 1 {
                     add_to_client_to_backend_map(
@@ -327,8 +360,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 Ok(xdp_action::XDP_TX)
 
             //// backend -> LB packets
-            // TODO: unhardcode BACKEND_IP
-            } else if source_addr == u32::to_be_bytes(BACKEND_IP) {
+            } else if is_backend_ip(source_addr) {
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: CLIENT_IP,
