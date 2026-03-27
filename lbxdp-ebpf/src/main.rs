@@ -239,34 +239,14 @@ fn get_least_conn_backend() -> Result<([u8; 4], [u8; 6]), ()> {
 fn is_backend_ip(ip: [u8; 4]) -> bool {
     let mut i = 0;
     while i < MAX_BACKENDS {
-        let _ = match BACKENDS.get(i) {
-            Some(v) => {
-                if are_ips_same(*v, ip) {
-                    return true;
-                }
+        if let Some(backend_ip) = BACKENDS.get(i) {
+            if *backend_ip == ip {
+                return true;
             }
-            None => (),
-        };
+        }
         i += 1;
     }
     false
-}
-
-#[inline(always)]
-fn are_ips_same(ip1: [u8; 4], ip2: [u8; 4]) -> bool {
-    if ip1[0] != ip2[0] {
-        return false;
-    }
-    if ip1[1] != ip2[1] {
-        return false;
-    }
-    if ip1[2] != ip2[2] {
-        return false;
-    }
-    if ip1[3] != ip2[3] {
-        return false;
-    }
-    true
 }
 
 #[xdp]
