@@ -275,6 +275,20 @@ fn get_from_client_to_backend_map(
     return Ok(client);
 }
 
+#[inline(always)]
+fn is_pure_ack(tcphdr: *const TcpHdr) -> bool {
+    unsafe {
+        (*tcphdr).ack() == 1
+            && (*tcphdr).syn() == 0
+            && (*tcphdr).fin() == 0
+            && (*tcphdr).rst() == 0
+            && (*tcphdr).psh() == 0
+            && (*tcphdr).urg() == 0
+            && (*tcphdr).ece() == 0
+            && (*tcphdr).cwr() == 0
+    }
+}
+
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -331,6 +345,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         least_loaded_backend.1,
                         ethhdr,
                     )?;
+                    info!(&ctx, "added to direct");
                     add_to_backend_to_client_map(
                         source_ip,
                         source_port,
@@ -381,6 +396,9 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     info!(&ctx, "response: removed from direct");
                 }
                 // TODO: for ACK and len = 0 increment BACKEND_CONNECTIONS
+                if is_pure_ack(tcphdr) {
+                    info!(&ctx, "GOT ACK");
+                }
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: u32::from_be_bytes(client.client_ip),
