@@ -169,12 +169,12 @@ fn add_to_client_to_backend_map(
 fn delete_from_client_to_backend_map(
     client_ip: [u8; 4],
     client_port: u16,
-    ethhdr: *const EthHdr,
+    client_mac: [u8; 6],
 ) -> Result<(), ()> {
     let map_key = ClientToBackendMapKey {
         client_ip: client_ip,
         client_port: client_port,
-        client_mac: unsafe { (*ethhdr).src_addr },
+        client_mac: client_mac,
     };
     unsafe { CLIENT_TO_BACKEND.remove(map_key).map_err(|_| ())? };
     Ok(())
@@ -315,10 +315,14 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 return Ok(xdp_action::XDP_PASS);
             }
 
+            let syn = unsafe { (*tcphdr).syn() };
+            let fin = unsafe { (*tcphdr).fin() };
+            let rst = unsafe { (*tcphdr).rst() };
+            let ack = unsafe { (*tcphdr).ack() };
+
             //// client -> LB packets
             if !is_backend_ip(source_ip) {
                 let least_loaded_backend = get_least_conn_backend()?;
-                let syn = unsafe { (*tcphdr).syn() };
                 if syn == 1 {
                     add_to_client_to_backend_map(
                         source_ip,
@@ -327,7 +331,6 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         least_loaded_backend.1,
                         ethhdr,
                     )?;
-                    info!(&ctx, "added to direct");
                     add_to_backend_to_client_map(
                         source_ip,
                         source_port,
@@ -337,9 +340,8 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     )?;
                     info!(&ctx, "added to reverse");
                 }
-                let fin = unsafe { (*tcphdr).fin() };
-                if fin == 1 {
-                    delete_from_client_to_backend_map(source_ip, source_port, ethhdr)?;
+                if fin == 1 || rst == 1 {
+                    delete_from_client_to_backend_map(source_ip, source_port, source_mac)?;
                     info!(&ctx, "removed from direct");
                     delete_from_backend_to_client_map(
                         least_loaded_backend.0,
@@ -368,6 +370,17 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             //// backend -> LB packets
             } else if is_backend_ip(source_ip) {
                 let client = get_from_client_to_backend_map(source_ip, source_mac)?;
+                if fin == 1 || rst == 1 {
+                    delete_from_backend_to_client_map(source_ip, source_mac)?;
+                    info!(&ctx, "response: removed from reverse");
+                    delete_from_client_to_backend_map(
+                        client.client_ip,
+                        client.client_port,
+                        client.client_mac,
+                    )?;
+                    info!(&ctx, "response: removed from direct");
+                }
+                // TODO: for ACK and len = 0 increment BACKEND_CONNECTIONS
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: u32::from_be_bytes(client.client_ip),
