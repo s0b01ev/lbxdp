@@ -98,8 +98,8 @@ async fn main() -> anyhow::Result<()> {
     // for i in 0..len {
     //     connections.set(i as u32, PerCpuValues::try_from(vec![0i32; nr_cpus])?, 0)?
     // }
-    connections.set(0 as u32, PerCpuValues::try_from(vec![2i32; nr_cpus])?, 0)?;
-    connections.set(1 as u32, PerCpuValues::try_from(vec![3i32; nr_cpus])?, 0)?;
+    connections.set(0 as u32, PerCpuValues::try_from(vec![3i32; nr_cpus])?, 0)?;
+    connections.set(1 as u32, PerCpuValues::try_from(vec![5i32; nr_cpus])?, 0)?;
     for i in len..MAX_BACKENDS as usize {
         connections.set(i as u32, PerCpuValues::try_from(vec![-1i32; nr_cpus])?, 0)?
     }

@@ -289,6 +289,47 @@ fn is_pure_ack(tcphdr: *const TcpHdr) -> bool {
     }
 }
 
+#[inline(always)]
+fn is_syn_ack(tcphdr: *const TcpHdr) -> bool {
+    unsafe {
+        (*tcphdr).ack() == 1
+            && (*tcphdr).syn() == 1
+            && (*tcphdr).fin() == 0
+            && (*tcphdr).rst() == 0
+            && (*tcphdr).psh() == 0
+            && (*tcphdr).urg() == 0
+            && (*tcphdr).ece() == 0
+            && (*tcphdr).cwr() == 0
+    }
+}
+
+// TODO: join with is_backend_ip()
+#[inline(always)]
+fn get_backend_idx(backend_ip: [u8; 4]) -> Result<u32, ()> {
+    let mut i = 0;
+    while i < MAX_BACKENDS {
+        if let Some(ip) = BACKENDS.get(i) {
+            if *ip == backend_ip {
+                return Ok(i);
+            }
+        }
+        i += 1;
+    }
+    return Err(());
+}
+
+fn increment_backend_connections(key: u32) -> Result<i32, ()> {
+    match unsafe { BACKEND_CONNECTIONS.get_ptr_mut(key) } {
+        Some(ptr) => {
+            unsafe { *ptr += 1 };
+            return Ok(unsafe { *ptr });
+        }
+        None => {
+            return Err(());
+        }
+    }
+}
+
 #[xdp]
 pub fn lbxdp(ctx: XdpContext) -> u32 {
     match try_lbxdp(ctx) {
@@ -395,9 +436,20 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     )?;
                     info!(&ctx, "response: removed from direct");
                 }
-                // TODO: for ACK and len = 0 increment BACKEND_CONNECTIONS
-                if is_pure_ack(tcphdr) {
-                    info!(&ctx, "GOT ACK");
+                // TODO: to make it real least conn, we need to build a state machine
+                // it's not enough to rely on ACK packets, because they can come not after
+                // the 3-way handshake, but during est. tcp session also
+                // So we will need to keep a conn state, like GotSyn -> GotSynAck -> GotAck
+                // and then mark this conn as established
+                if is_syn_ack(tcphdr) {
+                    info!(&ctx, "GOT SYN ACK");
+                    let backend_idx = get_backend_idx(source_ip)?;
+                    info!(&ctx, "backend id = {}", backend_idx);
+                    let conn = increment_backend_connections(backend_idx)?;
+                    info!(
+                        &ctx,
+                        "incremented conn for backend {} -> {}", backend_idx, conn
+                    );
                 }
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
