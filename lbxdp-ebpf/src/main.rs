@@ -30,6 +30,7 @@ struct ClientToBackendMapKey {
 struct ClientToBackendMapVal {
     backend_ip: [u8; 4],
     backend_mac: [u8; 6],
+    handshake_phase: TcpHandshakePhase,
 }
 
 #[repr(C)]
@@ -45,6 +46,7 @@ struct BackendToClientMapVal {
     client_ip: [u8; 4],
     client_port: u16,
     client_mac: [u8; 6],
+    handshake_phase: TcpHandshakePhase,
 }
 
 #[repr(C)]
@@ -52,6 +54,14 @@ struct BackendToClientMapVal {
 struct AddrPair {
     saddr: u32,
     daddr: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+enum TcpHandshakePhase {
+    Syn,
+    SynAck,
+    Ack,
 }
 
 const MAX_BACKENDS: u32 = 4;
@@ -147,6 +157,7 @@ fn add_to_client_to_backend_map(
     client_port: u16,
     backend_ip: [u8; 4],
     backend_mac: [u8; 6],
+    handshake_phase: TcpHandshakePhase,
     ethhdr: *const EthHdr,
 ) -> Result<(), ()> {
     let map_key = ClientToBackendMapKey {
@@ -157,6 +168,7 @@ fn add_to_client_to_backend_map(
     let map_val = ClientToBackendMapVal {
         backend_ip: backend_ip,
         backend_mac: backend_mac,
+        handshake_phase: handshake_phase,
     };
     unsafe {
         CLIENT_TO_BACKEND
@@ -185,6 +197,7 @@ fn add_to_backend_to_client_map(
     client_port: u16,
     backend_ip: [u8; 4],
     backend_mac: [u8; 6],
+    handshake_phase: TcpHandshakePhase,
     ethhdr: *const EthHdr,
 ) -> Result<(), ()> {
     let map_key = BackendToClientMapKey {
@@ -195,6 +208,7 @@ fn add_to_backend_to_client_map(
         client_ip: client_ip,
         client_port: client_port,
         client_mac: unsafe { (*ethhdr).src_addr },
+        handshake_phase: handshake_phase,
     };
     unsafe {
         BACKEND_TO_CLIENT
@@ -276,6 +290,63 @@ fn get_from_client_to_backend_map(
 }
 
 #[inline(always)]
+fn update_backend_to_client_map(
+    backend_ip: [u8; 4],
+    backend_mac: [u8; 6],
+    tcp_hs_phase: TcpHandshakePhase,
+) -> Result<(), ()> {
+    let map_key = BackendToClientMapKey {
+        backend_ip: backend_ip,
+        backend_mac: backend_mac,
+    };
+    let map_val = match unsafe { BACKEND_TO_CLIENT.get(map_key) } {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    let new_map_val = BackendToClientMapVal {
+        client_ip: map_val.client_ip,
+        client_port: map_val.client_port,
+        client_mac: map_val.client_mac,
+        handshake_phase: tcp_hs_phase,
+    };
+    unsafe {
+        BACKEND_TO_CLIENT
+            .insert(map_key, new_map_val, 0)
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn update_client_to_backend_map(
+    client_ip: [u8; 4],
+    client_port: u16,
+    client_mac: [u8; 6],
+    tcp_hs_phase: TcpHandshakePhase,
+) -> Result<(), ()> {
+    let map_key = ClientToBackendMapKey {
+        client_ip: client_ip,
+        client_port: client_port,
+        client_mac: client_mac,
+    };
+    let map_val = match unsafe { CLIENT_TO_BACKEND.get(map_key) } {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    let new_map_val = ClientToBackendMapVal {
+        backend_ip: map_val.backend_ip,
+        backend_mac: map_val.backend_mac,
+        handshake_phase: tcp_hs_phase,
+    };
+    unsafe {
+        CLIENT_TO_BACKEND
+            .insert(map_key, new_map_val, 0)
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+#[inline(always)]
 fn is_pure_ack(tcphdr: *const TcpHdr) -> bool {
     unsafe {
         (*tcphdr).ack() == 1
@@ -318,6 +389,7 @@ fn get_backend_idx(backend_ip: [u8; 4]) -> Result<u32, ()> {
     return Err(());
 }
 
+#[inline(always)]
 fn increment_backend_connections(key: u32) -> Result<i32, ()> {
     match unsafe { BACKEND_CONNECTIONS.get_ptr_mut(key) } {
         Some(ptr) => {
@@ -384,6 +456,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         source_port,
                         least_loaded_backend.0,
                         least_loaded_backend.1,
+                        TcpHandshakePhase::Syn,
                         ethhdr,
                     )?;
                     info!(&ctx, "added to direct");
@@ -392,6 +465,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         source_port,
                         least_loaded_backend.0,
                         least_loaded_backend.1,
+                        TcpHandshakePhase::Syn,
                         ethhdr,
                     )?;
                     info!(&ctx, "added to reverse");
@@ -436,21 +510,25 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     )?;
                     info!(&ctx, "response: removed from direct");
                 }
-                // TODO: to make it real least conn, we need to build a state machine
-                // it's not enough to rely on ACK packets, because they can come not after
-                // the 3-way handshake, but during est. tcp session also
-                // So we will need to keep a conn state, like GotSyn -> GotSynAck -> GotAck
-                // and then mark this conn as established
                 if is_syn_ack(tcphdr) {
                     info!(&ctx, "GOT SYN ACK");
+                    update_backend_to_client_map(source_ip, source_mac, TcpHandshakePhase::SynAck)?;
+                    update_client_to_backend_map(
+                        client.client_ip,
+                        client.client_port,
+                        client.client_mac,
+                        TcpHandshakePhase::SynAck,
+                    )?;
                     let backend_idx = get_backend_idx(source_ip)?;
                     info!(&ctx, "backend id = {}", backend_idx);
+                    // TODO: move to ACK
                     let conn = increment_backend_connections(backend_idx)?;
                     info!(
                         &ctx,
                         "incremented conn for backend {} -> {}", backend_idx, conn
                     );
                 }
+                if is_pure_ack(tcphdr) {}
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: u32::from_be_bytes(client.client_ip),
