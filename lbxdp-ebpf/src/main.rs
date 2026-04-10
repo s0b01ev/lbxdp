@@ -57,7 +57,7 @@ struct AddrPair {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum TcpHandshakePhase {
     Syn,
     SynAck,
@@ -519,16 +519,31 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         client.client_mac,
                         TcpHandshakePhase::SynAck,
                     )?;
-                    let backend_idx = get_backend_idx(source_ip)?;
-                    info!(&ctx, "backend id = {}", backend_idx);
-                    // TODO: move to ACK
-                    let conn = increment_backend_connections(backend_idx)?;
-                    info!(
-                        &ctx,
-                        "incremented conn for backend {} -> {}", backend_idx, conn
-                    );
                 }
-                if is_pure_ack(tcphdr) {}
+                if is_pure_ack(tcphdr) {
+                    if client.handshake_phase == TcpHandshakePhase::SynAck {
+                        info!(&ctx, "GOT ACK");
+                        let backend_idx = get_backend_idx(source_ip)?;
+                        info!(&ctx, "backend id = {}", backend_idx);
+                        let conn = increment_backend_connections(backend_idx)?;
+                        info!(
+                            &ctx,
+                            "incremented conn for backend {} -> {}", backend_idx, conn
+                        );
+                        update_backend_to_client_map(
+                            source_ip,
+                            source_mac,
+                            TcpHandshakePhase::Ack,
+                        )?;
+                        update_client_to_backend_map(
+                            client.client_ip,
+                            client.client_port,
+                            client.client_mac,
+                            TcpHandshakePhase::Ack,
+                        )?;
+                    }
+                }
+
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: u32::from_be_bytes(client.client_ip),
