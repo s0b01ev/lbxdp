@@ -22,6 +22,8 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive"] }
+config = "0.15.22"
+serde = {version = "1.0.228", features = ["derive"]}
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }

@@ -64,14 +64,11 @@ enum TcpHandshakePhase {
     Ack,
 }
 
+// TODO: to config
 const MAX_BACKENDS: u32 = 4;
-
 static OWN_IP: u32 = 0xc0a856fa; // 192.168.86.250
 static OWN_MAC: [u8; 6] = [0x48, 0xf1, 0x7f, 0x60, 0x29, 0xc6];
-static BACKEND_IP: u32 = 0xc0a856f7; // 192.168.86.247
-static BACKEND_MAC: [u8; 6] = [0xa0, 0x78, 0x17, 0x6c, 0xa4, 0x4f];
-static CLIENT_IP: u32 = 0xc0a8561d; // 192.168.86.29
-static CLIENT_MAC: [u8; 6] = [0xd8, 0x3a, 0xdd, 0x4c, 0xdf, 0xe7];
+static LISTENING_PORT: u16 = 8740;
 
 #[map(name = "CLIENT_TO_BACKEND")]
 static CLIENT_TO_BACKEND: PerCpuHashMap<ClientToBackendMapKey, ClientToBackendMapVal> =
@@ -437,8 +434,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             let source_port = u16::from_be_bytes(unsafe { (*tcphdr).source });
             let dest_port = u16::from_be_bytes(unsafe { (*tcphdr).dest });
 
-            // TODO: unhardcode port
-            if dest_port != 8740 && source_port != 8740 {
+            if dest_port != LISTENING_PORT && source_port != LISTENING_PORT {
                 return Ok(xdp_action::XDP_PASS);
             }
 

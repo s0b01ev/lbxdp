@@ -1,27 +1,48 @@
-use anyhow::Context as _;
+use anyhow::{Context, bail};
 use aya::{
-    maps::{Array, PerCpuArray, PerCpuHashMap, PerCpuValues},
+    maps::{Array, PerCpuArray, PerCpuValues},
     programs::{Xdp, XdpFlags},
     util::nr_cpus,
 };
-use clap::Parser;
+use config::{Config, File};
 use std::net::Ipv4Addr;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
 
-#[derive(Debug, Parser)]
-struct Opt {
-    #[clap(short, long, default_value = "wlp2s0")]
-    iface: String,
-}
+mod cfg;
 
 const MAX_BACKENDS: u32 = 4;
 
+async fn load_config() -> Result<cfg::Settings, config::ConfigError> {
+    let settings = Config::builder()
+        .add_source(File::with_name("config"))
+        .build()?;
+
+    settings.try_deserialize()
+}
+
+async fn ip_from_string(ip_str: String) -> anyhow::Result<Ipv4Addr> {
+    let octets: Vec<u8> = ip_str
+        .split('.')
+        .map(|o| {
+            o.parse::<u8>()
+                .with_context(|| format!("invalid IPv4 octet: {o}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if octets.len() != 4 {
+        bail!(
+            "invalid IPv4 address {ip_str}: expected 4 octets, got {}",
+            octets.len()
+        );
+    }
+
+    Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-
     env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -60,7 +81,10 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     }
-    let Opt { iface } = opt;
+
+    let cfg = load_config().await?;
+    let iface = cfg.load_balancer.iface;
+
     let program: &mut Xdp = ebpf
         .program_mut("lbxdp")
         .context("eBPF program 'lbxdp' was not found in the loaded object")?
