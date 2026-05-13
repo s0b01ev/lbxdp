@@ -7,7 +7,7 @@ use aya::{
 use config::{Config, File};
 use std::net::Ipv4Addr;
 #[rustfmt::skip]
-use log::{debug, warn};
+use log::{debug, warn, error};
 use tokio::signal;
 
 mod cfg;
@@ -22,7 +22,7 @@ async fn load_config() -> Result<cfg::Settings, config::ConfigError> {
     settings.try_deserialize()
 }
 
-async fn ip_from_string(ip_str: String) -> anyhow::Result<Ipv4Addr> {
+fn ip_from_string(ip_str: String) -> anyhow::Result<Ipv4Addr> {
     let octets: Vec<u8> = ip_str
         .split('.')
         .map(|o| {
@@ -39,6 +39,19 @@ async fn ip_from_string(ip_str: String) -> anyhow::Result<Ipv4Addr> {
     }
 
     Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+}
+
+fn mac_from_string(mac_str: String) -> anyhow::Result<[u8; 6]> {
+    let octets: Vec<u8> = mac_str
+        .split(':')
+        .map(|o| u8::from_str_radix(o, 16).with_context(|| format!("invalid mac octet: {o}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let len = octets.len();
+
+    octets
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid mac address {mac_str}: expected 6 octets, got {len}"))
 }
 
 #[tokio::main]
@@ -95,19 +108,34 @@ async fn main() -> anyhow::Result<()> {
 
     let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
 
-    let b_ips: Vec<[u8; 4]> = vec![
-        Ipv4Addr::new(192, 168, 86, 247).octets(),
-        Ipv4Addr::new(192, 168, 86, 248).octets(),
-    ];
+    let b_ips_cfg = cfg.backends.ips;
+    let b_macs_cfg = cfg.backends.macs;
+    let b_ips_len = b_ips_cfg.len();
+    let b_macs_len = b_macs_cfg.len();
+    if b_ips_len < 2 {
+        bail!("backed ips list should be >= 2, got {}", b_ips_len);
+    }
+    if b_macs_len < 2 {
+        bail!("backed macs list should be >= 2, got {}", b_macs_len);
+    }
+    if b_macs_len != b_ips_len {
+        bail!("backend ip list and mac list are of different lenght");
+    }
 
-    let b_macs: Vec<[u8; 6]> = vec![
-        [0xa0, 0x78, 0x17, 0x6c, 0xa4, 0x4f],
-        [0xa0, 0x78, 0x17, 0x6c, 0xa4, 0x4f],
-    ];
+    let b_ips: Vec<Ipv4Addr> = b_ips_cfg
+        .into_iter()
+        .map(ip_from_string)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let b_macs: Vec<[u8; 6]> = b_macs_cfg
+        .into_iter()
+        .map(mac_from_string)
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .try_into()?;
 
     let mut backend_ips: Array<_, [u8; 4]> = Array::try_from(ebpf.map_mut("BACKENDS").unwrap())?;
     for (idx, ip) in b_ips.iter().enumerate() {
-        backend_ips.set(idx as u32, ip, 0)?
+        backend_ips.set(idx as u32, ip.octets(), 0)?
     }
 
     let mut backend_macs: Array<_, [u8; 6]> =
