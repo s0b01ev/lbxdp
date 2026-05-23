@@ -7,12 +7,12 @@ use aya::{
 use config::{Config, File};
 use std::net::Ipv4Addr;
 #[rustfmt::skip]
-use log::{debug, warn, error};
+use log::{debug, warn};
 use tokio::signal;
 
-mod cfg;
+use lbxdp_common::MAX_BACKENDS;
 
-const MAX_BACKENDS: u32 = 4;
+mod cfg;
 
 async fn load_config() -> Result<cfg::Settings, config::ConfigError> {
     let settings = Config::builder()
