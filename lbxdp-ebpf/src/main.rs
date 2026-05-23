@@ -37,6 +37,7 @@ struct ClientToBackendMapVal {
 #[derive(Copy, Clone)]
 struct BackendToClientMapKey {
     backend_ip: [u8; 4],
+    client_port: u16,
     backend_mac: [u8; 6],
 }
 
@@ -44,7 +45,6 @@ struct BackendToClientMapKey {
 #[derive(Copy, Clone)]
 struct BackendToClientMapVal {
     client_ip: [u8; 4],
-    client_port: u16,
     client_mac: [u8; 6],
     handshake_phase: TcpHandshakePhase,
 }
@@ -199,11 +199,11 @@ fn add_to_backend_to_client_map(
 ) -> Result<(), ()> {
     let map_key = BackendToClientMapKey {
         backend_ip: backend_ip,
+        client_port: client_port,
         backend_mac: backend_mac,
     };
     let map_val = BackendToClientMapVal {
         client_ip: client_ip,
-        client_port: client_port,
         client_mac: unsafe { (*ethhdr).src_addr },
         handshake_phase: handshake_phase,
     };
@@ -215,9 +215,14 @@ fn add_to_backend_to_client_map(
     Ok(())
 }
 
-fn delete_from_backend_to_client_map(backend_ip: [u8; 4], backend_mac: [u8; 6]) -> Result<(), ()> {
+fn delete_from_backend_to_client_map(
+    backend_ip: [u8; 4],
+    client_port: u16,
+    backend_mac: [u8; 6],
+) -> Result<(), ()> {
     let map_key = BackendToClientMapKey {
         backend_ip: backend_ip,
+        client_port: client_port,
         backend_mac: backend_mac,
     };
     unsafe { BACKEND_TO_CLIENT.remove(map_key).map_err(|_| ())? };
@@ -272,11 +277,31 @@ fn is_backend_ip(ip: [u8; 4]) -> bool {
 
 #[inline(always)]
 fn get_from_client_to_backend_map(
+    client_ip: [u8; 4],
+    client_port: u16,
+    client_mac: [u8; 6],
+) -> Result<ClientToBackendMapVal, ()> {
+    let key = ClientToBackendMapKey {
+        client_ip,
+        client_port,
+        client_mac,
+    };
+    let backend = match unsafe { CLIENT_TO_BACKEND.get(key) } {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    return Ok(backend);
+}
+
+#[inline(always)]
+fn get_from_backend_to_client_map(
     backend_ip: [u8; 4],
+    client_port: u16,
     backend_mac: [u8; 6],
 ) -> Result<BackendToClientMapVal, ()> {
     let reverse_key = BackendToClientMapKey {
         backend_ip,
+        client_port,
         backend_mac,
     };
     let client = match unsafe { BACKEND_TO_CLIENT.get(reverse_key) } {
@@ -289,11 +314,13 @@ fn get_from_client_to_backend_map(
 #[inline(always)]
 fn update_backend_to_client_map(
     backend_ip: [u8; 4],
+    client_port: u16,
     backend_mac: [u8; 6],
     tcp_hs_phase: TcpHandshakePhase,
 ) -> Result<(), ()> {
     let map_key = BackendToClientMapKey {
         backend_ip: backend_ip,
+        client_port: client_port,
         backend_mac: backend_mac,
     };
     let map_val = match unsafe { BACKEND_TO_CLIENT.get(map_key) } {
@@ -302,7 +329,6 @@ fn update_backend_to_client_map(
     };
     let new_map_val = BackendToClientMapVal {
         client_ip: map_val.client_ip,
-        client_port: map_val.client_port,
         client_mac: map_val.client_mac,
         handshake_phase: tcp_hs_phase,
     };
@@ -371,6 +397,44 @@ fn is_syn_ack(tcphdr: *const TcpHdr) -> bool {
     }
 }
 
+#[inline(always)]
+fn is_fin(tcphdr: *const TcpHdr) -> bool {
+    unsafe { (*tcphdr).fin() == 1 }
+}
+
+#[inline(always)]
+fn is_pure_fin(tcphdr: *const TcpHdr) -> bool {
+    unsafe {
+        (*tcphdr).fin() == 1
+            && (*tcphdr).syn() == 0
+            && (*tcphdr).ack() == 0
+            && (*tcphdr).rst() == 0
+            && (*tcphdr).psh() == 0
+            && (*tcphdr).urg() == 0
+            && (*tcphdr).ece() == 0
+            && (*tcphdr).cwr() == 0
+    }
+}
+
+#[inline(always)]
+fn is_rst(tcphdr: *const TcpHdr) -> bool {
+    unsafe { (*tcphdr).rst() == 1 }
+}
+
+#[inline(always)]
+fn is_pure_rst(tcphdr: *const TcpHdr) -> bool {
+    unsafe {
+        (*tcphdr).rst() == 1
+            && (*tcphdr).syn() == 0
+            && (*tcphdr).ack() == 0
+            && (*tcphdr).fin() == 0
+            && (*tcphdr).psh() == 0
+            && (*tcphdr).urg() == 0
+            && (*tcphdr).ece() == 0
+            && (*tcphdr).cwr() == 0
+    }
+}
+
 // TODO: join with is_backend_ip()
 #[inline(always)]
 fn get_backend_idx(backend_ip: [u8; 4]) -> Result<u32, ()> {
@@ -387,10 +451,10 @@ fn get_backend_idx(backend_ip: [u8; 4]) -> Result<u32, ()> {
 }
 
 #[inline(always)]
-fn increment_backend_connections(key: u32) -> Result<i32, ()> {
+fn increment_backend_connections(key: u32, inc: bool) -> Result<i32, ()> {
     match unsafe { BACKEND_CONNECTIONS.get_ptr_mut(key) } {
         Some(ptr) => {
-            unsafe { *ptr += 1 };
+            unsafe { if inc { *ptr += 1 } else { *ptr -= 1 } };
             return Ok(unsafe { *ptr });
         }
         None => {
@@ -439,9 +503,6 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             }
 
             let syn = unsafe { (*tcphdr).syn() };
-            let fin = unsafe { (*tcphdr).fin() };
-            let rst = unsafe { (*tcphdr).rst() };
-            let ack = unsafe { (*tcphdr).ack() };
 
             //// client -> LB packets
             if !is_backend_ip(source_ip) {
@@ -464,17 +525,70 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         TcpHandshakePhase::Syn,
                         ethhdr,
                     )?;
-                    info!(&ctx, "added to reverse");
+                    info!(
+                        &ctx,
+                        "added to reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
+                        least_loaded_backend.0[0],
+                        least_loaded_backend.0[1],
+                        least_loaded_backend.0[2],
+                        least_loaded_backend.0[3],
+                        least_loaded_backend.1[0],
+                        least_loaded_backend.1[1],
+                        least_loaded_backend.1[2],
+                        least_loaded_backend.1[3],
+                        least_loaded_backend.1[4],
+                        least_loaded_backend.1[5],
+                        source_port
+                    );
                 }
-                if fin == 1 || rst == 1 {
+                if is_fin(tcphdr) || is_rst(tcphdr) {
+                    let backend =
+                        get_from_client_to_backend_map(source_ip, source_port, source_mac)?;
                     delete_from_client_to_backend_map(source_ip, source_port, source_mac)?;
-                    info!(&ctx, "removed from direct");
+                    info!(
+                        &ctx,
+                        "removed from direct --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
+                        source_ip[0],
+                        source_ip[1],
+                        source_ip[2],
+                        source_ip[3],
+                        source_mac[0],
+                        source_mac[1],
+                        source_mac[2],
+                        source_mac[3],
+                        source_mac[4],
+                        source_mac[5],
+                        source_port
+                    );
                     delete_from_backend_to_client_map(
-                        least_loaded_backend.0,
-                        least_loaded_backend.1,
+                        backend.backend_ip,
+                        source_port,
+                        backend.backend_mac,
                     )?;
-                    info!(&ctx, "removed from reverse");
+                    info!(
+                        &ctx,
+                        "removed from reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
+                        backend.backend_ip[0],
+                        backend.backend_ip[1],
+                        backend.backend_ip[2],
+                        backend.backend_ip[3],
+                        backend.backend_mac[0],
+                        backend.backend_mac[1],
+                        backend.backend_mac[2],
+                        backend.backend_mac[3],
+                        backend.backend_mac[4],
+                        backend.backend_mac[5],
+                        source_port
+                    );
+                    // should not get here, if the conn was removed from both maps and previoous calls failed
+                    let backend_idx = get_backend_idx(backend.backend_ip)?;
+                    let conn = increment_backend_connections(backend_idx, false)?;
+                    info!(
+                        &ctx,
+                        "decremented conn for backend {} -> {}", backend_idx, conn
+                    );
                 }
+
                 let new_ips = AddrPair {
                     saddr: OWN_IP,
                     daddr: u32::from_be_bytes(least_loaded_backend.0),
@@ -495,23 +609,49 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
 
             //// backend -> LB packets
             } else if is_backend_ip(source_ip) {
-                let client = get_from_client_to_backend_map(source_ip, source_mac)?;
-                if fin == 1 || rst == 1 {
-                    delete_from_backend_to_client_map(source_ip, source_mac)?;
+                let client = get_from_backend_to_client_map(source_ip, dest_port, source_mac)?;
+                let backend_idx = get_backend_idx(source_ip)?;
+                if is_fin(tcphdr) || is_rst(tcphdr) {
+                    let conn = increment_backend_connections(backend_idx, false)?;
+                    info!(
+                        &ctx,
+                        "decremented conn for backend {} -> {}", backend_idx, conn
+                    );
+                    delete_from_backend_to_client_map(source_ip, dest_port, source_mac)?;
                     info!(&ctx, "response: removed from reverse");
                     delete_from_client_to_backend_map(
                         client.client_ip,
-                        client.client_port,
+                        dest_port,
                         client.client_mac,
                     )?;
                     info!(&ctx, "response: removed from direct");
                 }
                 if is_syn_ack(tcphdr) {
                     info!(&ctx, "GOT SYN ACK");
-                    update_backend_to_client_map(source_ip, source_mac, TcpHandshakePhase::SynAck)?;
+                    update_backend_to_client_map(
+                        source_ip,
+                        dest_port,
+                        source_mac,
+                        TcpHandshakePhase::SynAck,
+                    )?;
+                    info!(
+                        &ctx,
+                        "updated  reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}, port: {}",
+                        source_ip[0],
+                        source_ip[1],
+                        source_ip[2],
+                        source_ip[3],
+                        source_mac[0],
+                        source_mac[1],
+                        source_mac[2],
+                        source_mac[3],
+                        source_mac[4],
+                        source_mac[5],
+                        dest_port
+                    );
                     update_client_to_backend_map(
                         client.client_ip,
-                        client.client_port,
+                        dest_port,
                         client.client_mac,
                         TcpHandshakePhase::SynAck,
                     )?;
@@ -519,21 +659,21 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 if is_pure_ack(tcphdr) {
                     if client.handshake_phase == TcpHandshakePhase::SynAck {
                         info!(&ctx, "GOT ACK");
-                        let backend_idx = get_backend_idx(source_ip)?;
                         info!(&ctx, "backend id = {}", backend_idx);
-                        let conn = increment_backend_connections(backend_idx)?;
+                        let conn = increment_backend_connections(backend_idx, true)?;
                         info!(
                             &ctx,
                             "incremented conn for backend {} -> {}", backend_idx, conn
                         );
                         update_backend_to_client_map(
                             source_ip,
+                            dest_port,
                             source_mac,
                             TcpHandshakePhase::Ack,
                         )?;
                         update_client_to_backend_map(
                             client.client_ip,
-                            client.client_port,
+                            dest_port,
                             client.client_mac,
                             TcpHandshakePhase::Ack,
                         )?;
