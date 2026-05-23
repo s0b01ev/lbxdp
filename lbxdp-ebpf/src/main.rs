@@ -9,7 +9,7 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_ebpf_bindings::bindings::__be32;
-use aya_log_ebpf::info;
+use aya_log_ebpf::debug;
 use core::{mem, ptr};
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -516,7 +516,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         TcpHandshakePhase::Syn,
                         ethhdr,
                     )?;
-                    info!(&ctx, "added to direct");
+                    debug!(&ctx, "added to direct");
                     add_to_backend_to_client_map(
                         source_ip,
                         source_port,
@@ -525,7 +525,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         TcpHandshakePhase::Syn,
                         ethhdr,
                     )?;
-                    info!(
+                    debug!(
                         &ctx,
                         "added to reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
                         least_loaded_backend.0[0],
@@ -545,7 +545,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     let backend =
                         get_from_client_to_backend_map(source_ip, source_port, source_mac)?;
                     delete_from_client_to_backend_map(source_ip, source_port, source_mac)?;
-                    info!(
+                    debug!(
                         &ctx,
                         "removed from direct --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
                         source_ip[0],
@@ -565,7 +565,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                         source_port,
                         backend.backend_mac,
                     )?;
-                    info!(
+                    debug!(
                         &ctx,
                         "removed from reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} port: {}",
                         backend.backend_ip[0],
@@ -583,7 +583,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                     // should not get here, if the conn was removed from both maps and previoous calls failed
                     let backend_idx = get_backend_idx(backend.backend_ip)?;
                     let conn = increment_backend_connections(backend_idx, false)?;
-                    info!(
+                    debug!(
                         &ctx,
                         "decremented conn for backend {} -> {}", backend_idx, conn
                     );
@@ -613,28 +613,28 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 let backend_idx = get_backend_idx(source_ip)?;
                 if is_fin(tcphdr) || is_rst(tcphdr) {
                     let conn = increment_backend_connections(backend_idx, false)?;
-                    info!(
+                    debug!(
                         &ctx,
                         "decremented conn for backend {} -> {}", backend_idx, conn
                     );
                     delete_from_backend_to_client_map(source_ip, dest_port, source_mac)?;
-                    info!(&ctx, "response: removed from reverse");
+                    debug!(&ctx, "response: removed from reverse");
                     delete_from_client_to_backend_map(
                         client.client_ip,
                         dest_port,
                         client.client_mac,
                     )?;
-                    info!(&ctx, "response: removed from direct");
+                    debug!(&ctx, "response: removed from direct");
                 }
                 if is_syn_ack(tcphdr) {
-                    info!(&ctx, "GOT SYN ACK");
+                    debug!(&ctx, "GOT SYN ACK");
                     update_backend_to_client_map(
                         source_ip,
                         dest_port,
                         source_mac,
                         TcpHandshakePhase::SynAck,
                     )?;
-                    info!(
+                    debug!(
                         &ctx,
                         "updated  reverse --- ip: {}.{}.{}.{} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}, port: {}",
                         source_ip[0],
@@ -658,10 +658,10 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 }
                 if is_pure_ack(tcphdr) {
                     if client.handshake_phase == TcpHandshakePhase::SynAck {
-                        info!(&ctx, "GOT ACK");
-                        info!(&ctx, "backend id = {}", backend_idx);
+                        debug!(&ctx, "GOT ACK");
+                        debug!(&ctx, "backend id = {}", backend_idx);
                         let conn = increment_backend_connections(backend_idx, true)?;
-                        info!(
+                        debug!(
                             &ctx,
                             "incremented conn for backend {} -> {}", backend_idx, conn
                         );
