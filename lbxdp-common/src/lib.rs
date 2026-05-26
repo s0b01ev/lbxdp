@@ -9,3 +9,6 @@ pub struct LBConfig {
     pub mac: [u8; 6],
     pub port: u16,
 }
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LBConfig {}

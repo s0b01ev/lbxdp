@@ -17,6 +17,8 @@ use network_types::{
     tcp::TcpHdr,
 };
 
+use lbxdp_common::{LBConfig, MAX_BACKENDS};
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct ClientToBackendMapKey {
@@ -65,7 +67,6 @@ enum TcpHandshakePhase {
 }
 
 // TODO: to config
-const MAX_BACKENDS: u32 = 4;
 static OWN_IP: u32 = 0xc0a856fa; // 192.168.86.250
 static OWN_MAC: [u8; 6] = [0x48, 0xf1, 0x7f, 0x60, 0x29, 0xc6];
 static LISTENING_PORT: u16 = 8740;
@@ -86,6 +87,9 @@ static BACKEND_MACS: Array<[u8; 6]> = Array::with_max_entries(MAX_BACKENDS, 0);
 
 #[map(name = "BACKEND_CONNECTIONS")]
 static BACKEND_CONNECTIONS: PerCpuArray<i32> = PerCpuArray::with_max_entries(MAX_BACKENDS, 0);
+
+#[map(name = "LOAD_BALANCER_CONFIG")]
+static LOAD_BALANCER_CONFIG: Array<LBConfig> = Array::with_max_entries(1, 0);
 
 #[inline(always)]
 fn csum_diff(old_ips: AddrPair, new_ips: AddrPair) -> i64 {

@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use aya::{
     maps::{Array, PerCpuArray, PerCpuValues},
-    programs::{Xdp, XdpFlags},
+    programs::{Xdp, XdpMode},
     util::nr_cpus,
 };
 use config::{Config, File};
@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 use log::{debug, warn};
 use tokio::signal;
 
-use lbxdp_common::MAX_BACKENDS;
+use lbxdp_common::{LBConfig, MAX_BACKENDS};
 
 mod cfg;
 
@@ -98,13 +98,23 @@ async fn main() -> anyhow::Result<()> {
     let cfg = load_config().await?;
     let iface = cfg.load_balancer.iface;
 
+    let lb_config = LBConfig {
+        ip: ip_from_string(cfg.load_balancer.ip)?.octets(),
+        mac: mac_from_string(cfg.load_balancer.mac)?,
+        port: cfg.load_balancer.port,
+    };
+    let mut lb_map: Array<_, LBConfig> =
+        Array::try_from(ebpf.map_mut("LOAD_BALANCER_CONFIG").unwrap())?;
+
+    lb_map.set(0, lb_config, 0)?;
+
     let program: &mut Xdp = ebpf
         .program_mut("lbxdp")
         .context("eBPF program 'lbxdp' was not found in the loaded object")?
         .try_into()?;
     program.load()?;
-    program.attach(&iface, XdpFlags::default())
-        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    program.attach(&iface, XdpMode::default())
+        .context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
 
     let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
 
