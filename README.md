@@ -1,19 +1,28 @@
 # lbxdp
 
 ## Description
-This little project was implemented on educational purposes mainly, and not intended to become a real production ready application (as of yet at least :))
-This is a working prototype of TCP load balancer supporting least connection load balancing algorithm,  based on eBPF xdp application. 
+This little project was implemented mainly for educational purposes and is not intended to be a production-ready application, at least not yet.
+It is a working prototype of a TCP load balancer based on an eBPF XDP program. It supports a least-connections balancing strategy and performs packet rewriting directly in the XDP path, before packets reach the normal kernel networking stack.
 
-## Working priniple
-Incoming requests routed by means of NATing ip and mac addresses for both source and destination. We keep track of all active connection and update connection map along with tcp connection develops.
-We keep backends active connections in a separate map, that provides least connection lb algorithm.
+The project is intended to show how an XDP program can make forwarding decisions, rewrite packets, and share runtime configuration with a user-space loader through eBPF maps. The user-space component loads the program, attaches it to an interface, reads the local configuration, and fills maps such as the backend address lists and load balancer configuration.
+
+## Working principle
+Incoming requests are routed by NATing both IP and MAC addresses for the source and destination. For packets going from a client to a backend, the load balancer rewrites the destination to the selected backend. For packets returning from a backend to a client, it rewrites the source back to the load balancer address so the client sees a single stable endpoint.
+
+The eBPF program keeps the active connection state in maps keyed by client/backend packet details. The main connection maps are used in both directions, so the program can recognize return traffic and send it back to the correct client. Backend IPs, backend MAC addresses, per-backend connection counters, and load balancer configuration are also stored in separate maps populated by user space.
+
+To keep connection counters reasonably accurate, the program has a small TCP connection state machine. It tracks the SYN, SYN-ACK, and ACK phases of the TCP handshake, and also watches FIN and RST packets to detect connection shutdown. This is intentionally lightweight and only tracks enough state for the load balancer to associate packets with the selected backend, update connection maps as traffic develops, and maintain the least-connections counters.
 
 ## Limitations
-- Clients, Load Balancer and Backends are expected to reside in the same LAN segment
-- Assymetric traffic routing would be an issue. Both client-to-lb and lb-to-client traffic must go through Load  Balancer.
+- Clients, the load balancer, and the backends are expected to reside in the same LAN segment.
+- Asymmetric traffic routing is not supported. Both client-to-load-balancer and backend-to-load-balancer traffic must pass through the load balancer, otherwise the eBPF program will not see enough packets to maintain connection state.
+- The prototype assumes a small, fixed maximum number of backends configured through maps at startup.
+- The implementation is focused on IPv4/TCP traffic and does not try to be a general-purpose L4 load balancer.
 
-## Known bugs:
-- Given that source port is not NATed, there is a likebility (quite low in lab environment), that multiple clients open connections with the same source tcp port, and get distributed to the same backend. In this case these connections would collapse in single one in connections maps.   
+## Known bugs
+- Since the source port is not NATed, there is a possibility, although quite low in a lab environment, that multiple clients open connections with the same source TCP port and get distributed to the same backend. In that case, those connections can collapse into a single entry in the connection maps.
+- TCP state tracking is intentionally minimal. Unusual packet loss, retransmission patterns, or connections that do not follow the expected handshake/teardown flow may leave counters or map entries inaccurate.
+- A stale connection map cleanup mechanism is not implemented.
 
 ## Prerequisites
 
