@@ -1,5 +1,20 @@
 # lbxdp
 
+## Description
+This little project was implemented on educational purposes mainly, and not intended to become a real production ready application (as of yet at least :))
+This is a working prototype of TCP load balancer supporting least connection load balancing algorithm,  based on eBPF xdp application. 
+
+## Working priniple
+Incoming requests routed by means of NATing ip and mac addresses for both source and destination. We keep track of all active connection and update connection map along with tcp connection develops.
+We keep backends active connections in a separate map, that provides least connection lb algorithm.
+
+## Limitations
+- Clients, Load Balancer and Backends are expected to reside in the same LAN segment
+- Assymetric traffic routing would be an issue. Both client-to-lb and lb-to-client traffic must go through Load  Balancer.
+
+## Known bugs:
+- Given that source port is not NATed, there is a likebility (quite low in lab environment), that multiple clients open connections with the same source tcp port, and get distributed to the same backend. In this case these connections would collapse in single one in connections maps.   
+
 ## Prerequisites
 
 1. stable rust toolchains: `rustup toolchain install stable`
