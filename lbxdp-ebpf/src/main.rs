@@ -66,11 +66,6 @@ enum TcpHandshakePhase {
     Ack,
 }
 
-// TODO: to config
-static OWN_IP: u32 = 0xc0a856fa; // 192.168.86.250
-static OWN_MAC: [u8; 6] = [0x48, 0xf1, 0x7f, 0x60, 0x29, 0xc6];
-static LISTENING_PORT: u16 = 8740;
-
 #[map(name = "CLIENT_TO_BACKEND")]
 static CLIENT_TO_BACKEND: PerCpuHashMap<ClientToBackendMapKey, ClientToBackendMapVal> =
     PerCpuHashMap::with_max_entries(1024, 0);
@@ -476,6 +471,14 @@ pub fn lbxdp(ctx: XdpContext) -> u32 {
 }
 
 fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
+    let config = match LOAD_BALANCER_CONFIG.get(0u32) {
+        Some(&v) => v,
+        None => return Err(()),
+    };
+    let listening_port = config.port;
+    let own_ip = config.ip;
+    let own_mac = config.mac;
+
     let ethhdr: *mut EthHdr = mut_ptr_at(&ctx, 0)?;
     match unsafe { (*ethhdr).ether_type() } {
         Ok(EtherType::Ipv4) => {}
@@ -502,7 +505,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
             let source_port = u16::from_be_bytes(unsafe { (*tcphdr).source });
             let dest_port = u16::from_be_bytes(unsafe { (*tcphdr).dest });
 
-            if dest_port != LISTENING_PORT && source_port != LISTENING_PORT {
+            if dest_port != listening_port && source_port != listening_port {
                 return Ok(xdp_action::XDP_PASS);
             }
 
@@ -594,7 +597,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 }
 
                 let new_ips = AddrPair {
-                    saddr: OWN_IP,
+                    saddr: u32::from_be_bytes(own_ip),
                     daddr: u32::from_be_bytes(least_loaded_backend.0),
                 };
                 let diff = csum_diff(old_ips, new_ips);
@@ -603,8 +606,8 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 }
                 unsafe {
                     (*ipv4hdr).dst_addr = least_loaded_backend.0;
-                    (*ipv4hdr).src_addr = u32::to_be_bytes(OWN_IP);
-                    (*ethhdr).src_addr = OWN_MAC;
+                    (*ipv4hdr).src_addr = own_ip;
+                    (*ethhdr).src_addr = own_mac;
                     (*ethhdr).dst_addr = least_loaded_backend.1;
                     (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
@@ -685,7 +688,7 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
                 }
 
                 let new_ips = AddrPair {
-                    saddr: OWN_IP,
+                    saddr: u32::from_be_bytes(own_ip),
                     daddr: u32::from_be_bytes(client.client_ip),
                 };
                 let diff = csum_diff(old_ips, new_ips);
@@ -695,9 +698,9 @@ fn try_lbxdp(ctx: XdpContext) -> Result<u32, ()> {
 
                 unsafe {
                     (*ipv4hdr).dst_addr = client.client_ip;
-                    (*ipv4hdr).src_addr = u32::to_be_bytes(OWN_IP);
+                    (*ipv4hdr).src_addr = own_ip;
                     (*ethhdr).dst_addr = client.client_mac;
-                    (*ethhdr).src_addr = OWN_MAC;
+                    (*ethhdr).src_addr = own_mac;
                     (*ipv4hdr).check = apply_diff((*ipv4hdr).check, diff);
                     (*tcphdr).check = apply_diff((*tcphdr).check, diff);
                 };
