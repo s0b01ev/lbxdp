@@ -1,20 +1,61 @@
-use anyhow::Context as _;
-use aya::programs::{Xdp, XdpFlags};
-use clap::Parser;
+use anyhow::{Context, bail};
+use aya::{
+    maps::{Array, PerCpuArray, PerCpuValues},
+    programs::{Xdp, XdpMode},
+    util::nr_cpus,
+};
+use config::{Config, File};
+use std::net::Ipv4Addr;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
 
-#[derive(Debug, Parser)]
-struct Opt {
-    #[clap(short, long, default_value = "wlp2s0")]
-    iface: String,
+use lbxdp_common::{LBConfig, MAX_BACKENDS};
+
+mod cfg;
+
+async fn load_config() -> Result<cfg::Settings, config::ConfigError> {
+    let settings = Config::builder()
+        .add_source(File::with_name("config"))
+        .build()?;
+
+    settings.try_deserialize()
+}
+
+fn ip_from_string(ip_str: String) -> anyhow::Result<Ipv4Addr> {
+    let octets: Vec<u8> = ip_str
+        .split('.')
+        .map(|o| {
+            o.parse::<u8>()
+                .with_context(|| format!("invalid IPv4 octet: {o}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if octets.len() != 4 {
+        bail!(
+            "invalid IPv4 address {ip_str}: expected 4 octets, got {}",
+            octets.len()
+        );
+    }
+
+    Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+}
+
+fn mac_from_string(mac_str: String) -> anyhow::Result<[u8; 6]> {
+    let octets: Vec<u8> = mac_str
+        .split(':')
+        .map(|o| u8::from_str_radix(o, 16).with_context(|| format!("invalid mac octet: {o}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let len = octets.len();
+
+    octets
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid mac address {mac_str}: expected 6 octets, got {len}"))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-
     env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -53,14 +94,75 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     }
-    let Opt { iface } = opt;
+
+    let cfg = load_config().await?;
+    let iface = cfg.load_balancer.iface;
+
+    let lb_config = LBConfig {
+        ip: ip_from_string(cfg.load_balancer.ip)?.octets(),
+        mac: mac_from_string(cfg.load_balancer.mac)?,
+        port: cfg.load_balancer.port,
+    };
+    let mut lb_map: Array<_, LBConfig> =
+        Array::try_from(ebpf.map_mut("LOAD_BALANCER_CONFIG").unwrap())?;
+
+    lb_map.set(0, lb_config, 0)?;
+
     let program: &mut Xdp = ebpf
         .program_mut("lbxdp")
         .context("eBPF program 'lbxdp' was not found in the loaded object")?
         .try_into()?;
     program.load()?;
-    program.attach(&iface, XdpFlags::default())
-        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    program.attach(&iface, XdpMode::default())
+        .context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
+
+    let nr_cpus = nr_cpus().map_err(|(_, error)| error)?;
+
+    let b_ips_cfg = cfg.backends.ips;
+    let b_macs_cfg = cfg.backends.macs;
+    let b_ips_len = b_ips_cfg.len();
+    let b_macs_len = b_macs_cfg.len();
+    if b_ips_len < 2 {
+        bail!("backed ips list should be >= 2, got {}", b_ips_len);
+    }
+    if b_macs_len < 2 {
+        bail!("backed macs list should be >= 2, got {}", b_macs_len);
+    }
+    if b_macs_len != b_ips_len {
+        bail!("backend ip list and mac list are of different lenght");
+    }
+
+    let b_ips: Vec<Ipv4Addr> = b_ips_cfg
+        .into_iter()
+        .map(ip_from_string)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let b_macs: Vec<[u8; 6]> = b_macs_cfg
+        .into_iter()
+        .map(mac_from_string)
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .try_into()?;
+
+    let mut backend_ips: Array<_, [u8; 4]> = Array::try_from(ebpf.map_mut("BACKENDS").unwrap())?;
+    for (idx, ip) in b_ips.iter().enumerate() {
+        backend_ips.set(idx as u32, ip.octets(), 0)?
+    }
+
+    let mut backend_macs: Array<_, [u8; 6]> =
+        Array::try_from(ebpf.map_mut("BACKEND_MACS").unwrap())?;
+    for (idx, mac) in b_macs.iter().enumerate() {
+        backend_macs.set(idx as u32, mac, 0)?
+    }
+
+    let mut connections: PerCpuArray<_, i32> =
+        PerCpuArray::try_from(ebpf.map_mut("BACKEND_CONNECTIONS").unwrap())?;
+    let len = b_ips.len();
+    for i in 0..len {
+        connections.set(i as u32, PerCpuValues::try_from(vec![0i32; nr_cpus])?, 0)?
+    }
+    for i in len..MAX_BACKENDS as usize {
+        connections.set(i as u32, PerCpuValues::try_from(vec![-1i32; nr_cpus])?, 0)?
+    }
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
